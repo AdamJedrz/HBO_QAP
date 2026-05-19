@@ -489,14 +489,39 @@ def run_hbo_once(instance_item, N, T, use_raw_perm=True, seed=None):
     }
 
 
-def evaluate_instance(instance_item, N, T, n_runs=10, use_raw_perm=True, seed0=123):
+def evaluate_instance(instance_item, N, T, n_runs=10, use_raw_perm=True, seed0=123, ray_enabled=True):
     """
     Multiple runs on a single instance.
     """
-    runs = []
-    for r in range(n_runs):
-        out = run_hbo_once(instance_item, N=N, T=T, use_raw_perm=use_raw_perm, seed=seed0 + r)
-        runs.append(out)
+    eval_start = time.perf_counter()
+    ray_setup_time = 0.0
+
+    if ray_enabled:
+        ray_setup_start = time.perf_counter()
+        import ray
+        if not ray.is_initialized():
+            ray.init(ignore_reinit_error=True, include_dashboard=False)
+        ray_setup_time = time.perf_counter() - ray_setup_start
+
+        remote_run_hbo_once = ray.remote(run_hbo_once)
+        futures = [
+            remote_run_hbo_once.remote(
+                instance_item,
+                N=N,
+                T=T,
+                use_raw_perm=use_raw_perm,
+                seed=seed0 + r
+            )
+            for r in range(n_runs)
+        ]
+        runs = ray.get(futures)
+    else:
+        runs = []
+        for r in range(n_runs):
+            out = run_hbo_once(instance_item, N=N, T=T, use_raw_perm=use_raw_perm, seed=seed0 + r)
+            runs.append(out)
+
+    total_time = time.perf_counter() - eval_start
 
     costs = [r["best_cost"] for r in runs]
     times = [r["time_sec"] for r in runs]
@@ -505,12 +530,16 @@ def evaluate_instance(instance_item, N, T, n_runs=10, use_raw_perm=True, seed0=1
         "name": instance_item["instance"]["name"],
         "n": instance_item["instance"]["n"],
         "runs": n_runs,
+        "ray_enabled": ray_enabled,
         "best_cost": min(costs),
         "mean_cost": statistics.mean(costs),
         "median_cost": statistics.median(costs),
         "std_cost": statistics.pstdev(costs) if len(costs) > 1 else 0.0,
         "worst_cost": max(costs),
         "mean_time_sec": statistics.mean(times),
+        "total_time_sec": total_time,
+        "ray_setup_time_sec": ray_setup_time,
+        "runs_per_sec": n_runs / total_time if total_time > 0 else 0.0,
         "all_costs": costs,
         "all_times": times,
     }
@@ -527,10 +556,11 @@ def evaluate_instance(instance_item, N, T, n_runs=10, use_raw_perm=True, seed0=1
     return summary
 
 
-def evaluate_family_items(items, N, T, n_runs=10, use_raw_perm=True, seed0=123, verbose=True):
+def evaluate_family_items(items, N, T, n_runs=10, use_raw_perm=True, seed0=123, verbose=True, ray_enabled=False):
     """
     Evaluation of multiple instances from one family.
     """
+    family_start = time.perf_counter()
     results = []
     for i, item in enumerate(items):
         summary = evaluate_instance(
@@ -540,46 +570,55 @@ def evaluate_family_items(items, N, T, n_runs=10, use_raw_perm=True, seed0=123, 
             n_runs=n_runs,
             use_raw_perm=use_raw_perm,
             seed0=seed0 + 1000 * i,
+            ray_enabled=ray_enabled,
         )
         results.append(summary)
 
         if verbose:
-            msg = f'{summary["name"]}: best={summary["best_cost"]}, mean={summary["mean_cost"]:.2f}'
+            msg = f'{summary["name"]}: best={summary["best_cost"]}, mean={summary["mean_cost"]:.2f}, total_time={summary["total_time_sec"]:.3f}s, runs_per_sec={summary["runs_per_sec"]:.3f}, ray={summary["ray_enabled"]}'
             if "reference_cost" in summary:
                 msg += f', ref={summary["reference_cost"]}, best_gap={summary["best_gap_pct"]:.3f}%'
             print(msg)
+
+    family_total_time = time.perf_counter() - family_start
+
+    if verbose:
+        print(f'family_total_time_sec={family_total_time:.3f}, ray_enabled={ray_enabled}')
 
     return results
 
 
 
 def main():
-    #item = load_instance("chr12a", qapdata_dir="qapdata", qapsoln_dir="qapsoln")
+    item = load_instance("chr18a", qapdata_dir="qapdata", qapsoln_dir="qapsoln")
 
-    #summary = evaluate_instance(
-    #    item,
-    #    N=120,
-    #    T=6000,
-    #    n_runs=3,
-    #    use_raw_perm=True,
-    #    seed0=123
-    #)
-
-    #print(summary)
-
-
-    items = load_family("chr", qapdata_dir="qapdata", qapsoln_dir="qapsoln", limit=2)
-
-    results = evaluate_family_items(
-        items,
-        N=120,
-        T=6000,
-        n_runs=1,
-        use_raw_perm=False,
-        seed0=123
+    summary = evaluate_instance(
+       item,
+       N=120,
+       T=7000,
+       n_runs=5,
+       use_raw_perm=True,
+       seed0=123,
+       ray_enabled=False
     )
 
-    print(results)
+    print(summary)
+
+
+    #items = load_family("chr", qapdata_dir="qapdata", qapsoln_dir="qapsoln", limit=1)
+
+    #results = evaluate_family_items(
+    #    items,
+    #    N=120,
+    #    T=6000,
+    #    n_runs=2,
+    #    use_raw_perm=False,
+    #    seed0=123,
+    #    verbose=True,
+    #    ray_enabled=True
+    #)
+
+    #print(results)
 
 if __name__ == "__main__":
     main()
